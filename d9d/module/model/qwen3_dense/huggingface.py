@@ -58,7 +58,11 @@ def mapper_from_huggingface_qwen3_dense(params: Qwen3DenseParameters) -> ModelSt
                 name_from="embed_tokens.weight", name_to=f"embed_tokens.token_embedding.{vocab_name}.weight"
             ),
             *(
-                ModelStateMapperPrefixScope(_mapper_from_huggingface_qwen3_dense_layer(), prefix=f"layers.{layer_i}.")
+                ModelStateMapperPrefixScope(
+                    _mapper_from_huggingface_qwen3_dense_layer(),
+                    source_prefix=f"layers.{layer_i}.",
+                    target_prefix=f"layers.{layer_i}.",
+                )
                 for layer_i in range(params.num_hidden_layers)
             ),
             ModelStateMapperIdentity("norm.weight"),
@@ -80,7 +84,9 @@ def mapper_from_huggingface_qwen3_dense_for_causal_lm(params: Qwen3DenseForCausa
     vocab_name = _vocab_name_for(params.model)
     return ModelStateMapperParallel(
         [
-            ModelStateMapperPrefixScope(mapper_from_huggingface_qwen3_dense(params.model), prefix="model."),
+            ModelStateMapperPrefixScope(
+                mapper_from_huggingface_qwen3_dense(params.model), source_prefix="model.", target_prefix="model."
+            ),
             ModelStateMapperRename(name_from="lm_head.weight", name_to=f"lm_head.lm_head.{vocab_name}.weight"),
         ]
     )
@@ -102,7 +108,9 @@ def mapper_from_huggingface_qwen3_dense_for_classification(
 
     return ModelStateMapperParallel(
         [
-            ModelStateMapperPrefixScope(mapper_from_huggingface_qwen3_dense(params.model), prefix="model."),
+            ModelStateMapperPrefixScope(
+                mapper_from_huggingface_qwen3_dense(params.model), source_prefix="model.", target_prefix="model."
+            ),
             ModelStateMapperRename(name_from="score.weight", name_to="cls_head.score.weight"),
         ]
     )
@@ -147,7 +155,11 @@ def mapper_to_huggingface_qwen3_dense(params: Qwen3DenseParameters) -> ModelStat
                 name_from=f"embed_tokens.token_embedding.{vocab_name}.weight", name_to="embed_tokens.weight"
             ),
             *(
-                ModelStateMapperPrefixScope(_mapper_to_huggingface_qwen3_dense_layer(), prefix=f"layers.{layer_i}.")
+                ModelStateMapperPrefixScope(
+                    _mapper_to_huggingface_qwen3_dense_layer(),
+                    source_prefix=f"layers.{layer_i}.",
+                    target_prefix=f"layers.{layer_i}.",
+                )
                 for layer_i in range(params.num_hidden_layers)
             ),
             ModelStateMapperIdentity("norm.weight"),
@@ -169,7 +181,9 @@ def mapper_to_huggingface_qwen3_dense_for_causal_lm(params: Qwen3DenseForCausalL
     vocab_name = _vocab_name_for(params.model)
     return ModelStateMapperParallel(
         [
-            ModelStateMapperPrefixScope(mapper_to_huggingface_qwen3_dense(params.model), prefix="model."),
+            ModelStateMapperPrefixScope(
+                mapper_to_huggingface_qwen3_dense(params.model), source_prefix="model.", target_prefix="model."
+            ),
             ModelStateMapperRename(name_from=f"lm_head.lm_head.{vocab_name}.weight", name_to="lm_head.weight"),
         ]
     )
@@ -190,7 +204,9 @@ def mapper_to_huggingface_qwen3_dense_for_classification(
     """
     return ModelStateMapperParallel(
         [
-            ModelStateMapperPrefixScope(mapper_to_huggingface_qwen3_dense(params.model), prefix="model."),
+            ModelStateMapperPrefixScope(
+                mapper_to_huggingface_qwen3_dense(params.model), source_prefix="model.", target_prefix="model."
+            ),
             ModelStateMapperRename(name_from="cls_head.score.weight", name_to="score.weight"),
         ]
     )

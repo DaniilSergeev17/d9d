@@ -139,7 +139,9 @@ def mapper_from_huggingface_qwen3_moe(
             ),
             *(
                 ModelStateMapperPrefixScope(
-                    _mapper_from_huggingface_qwen3_moe_layer(params.layer, experts_format), prefix=f"layers.{layer_i}."
+                    _mapper_from_huggingface_qwen3_moe_layer(params.layer, experts_format),
+                    source_prefix=f"layers.{layer_i}.",
+                    target_prefix=f"layers.{layer_i}.",
                 )
                 for layer_i in range(params.num_hidden_layers)
             ),
@@ -167,7 +169,9 @@ def mapper_from_huggingface_qwen3_moe_for_causal_lm(
     return ModelStateMapperParallel(
         [
             ModelStateMapperPrefixScope(
-                mapper_from_huggingface_qwen3_moe(params.model, experts_format), prefix="model."
+                mapper_from_huggingface_qwen3_moe(params.model, experts_format),
+                source_prefix="model.",
+                target_prefix="model.",
             ),
             ModelStateMapperRename(name_from="lm_head.weight", name_to=f"lm_head.lm_head.{vocab_name}.weight"),
         ]
@@ -193,7 +197,9 @@ def mapper_from_huggingface_qwen3_moe_for_classification(
     return ModelStateMapperParallel(
         [
             ModelStateMapperPrefixScope(
-                mapper_from_huggingface_qwen3_moe(params.model, experts_format), prefix="model."
+                mapper_from_huggingface_qwen3_moe(params.model, experts_format),
+                source_prefix="model.",
+                target_prefix="model.",
             ),
             ModelStateMapperRename(name_from="score.weight", name_to="cls_head.score.weight"),
         ]
@@ -294,7 +300,9 @@ def mapper_to_huggingface_qwen3_moe(
             ),
             *(
                 ModelStateMapperPrefixScope(
-                    _mapper_to_huggingface_qwen3_moe_layer(params.layer, experts_format), prefix=f"layers.{layer_i}."
+                    _mapper_to_huggingface_qwen3_moe_layer(params.layer, experts_format),
+                    source_prefix=f"layers.{layer_i}.",
+                    target_prefix=f"layers.{layer_i}.",
                 )
                 for layer_i in range(params.num_hidden_layers)
             ),
@@ -321,7 +329,11 @@ def mapper_to_huggingface_qwen3_moe_for_causal_lm(
     vocab_name = _vocab_name_for(params.model)
     return ModelStateMapperParallel(
         [
-            ModelStateMapperPrefixScope(mapper_to_huggingface_qwen3_moe(params.model, experts_format), prefix="model."),
+            ModelStateMapperPrefixScope(
+                mapper_to_huggingface_qwen3_moe(params.model, experts_format),
+                source_prefix="model.",
+                target_prefix="model.",
+            ),
             ModelStateMapperRename(name_from=f"lm_head.lm_head.{vocab_name}.weight", name_to="lm_head.weight"),
         ]
     )
@@ -344,7 +356,11 @@ def mapper_to_huggingface_qwen3_moe_for_classification(
     """
     return ModelStateMapperParallel(
         [
-            ModelStateMapperPrefixScope(mapper_to_huggingface_qwen3_moe(params.model, experts_format), prefix="model."),
+            ModelStateMapperPrefixScope(
+                mapper_to_huggingface_qwen3_moe(params.model, experts_format),
+                source_prefix="model.",
+                target_prefix="model.",
+            ),
             ModelStateMapperRename(name_from="cls_head.score.weight", name_to="score.weight"),
         ]
     )

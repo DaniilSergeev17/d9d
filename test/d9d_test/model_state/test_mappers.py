@@ -303,28 +303,80 @@ def test_dtensor_mapper_logic(dist_ctx_factory):
 
 
 @pytest.mark.local
-def test_prefix_scope_mapper():
+def test_prefix_scope_mapper_both_prefixes() -> None:
     child_mapper = MergeAddMapper("weight", "bias", "out")
-    prefix_mapper = ModelStateMapperPrefixScope(child_mapper, "model.layers.0.")
+    prefix_mapper = ModelStateMapperPrefixScope(
+        child_mapper, source_prefix="src.layers.0.", target_prefix="tgt.layers.0."
+    )
 
     expected_groups = frozenset(
         [
             StateGroup(
-                inputs=frozenset(["model.layers.0.weight", "model.layers.0.bias"]),
-                outputs=frozenset(["model.layers.0.out"]),
+                inputs=frozenset(["src.layers.0.weight", "src.layers.0.bias"]),
+                outputs=frozenset(["tgt.layers.0.out"]),
             )
         ]
     )
     assert prefix_mapper.state_dependency_groups() == expected_groups
 
     data = {
-        "model.layers.0.weight": torch.tensor(10),
-        "model.layers.0.bias": torch.tensor(5),
+        "src.layers.0.weight": torch.tensor(10),
+        "src.layers.0.bias": torch.tensor(5),
     }
 
     res = prefix_mapper.apply(data)
-    assert res.keys() == {"model.layers.0.out"}
-    assert res["model.layers.0.out"].item() == 15
+    assert set(res.keys()) == {"tgt.layers.0.out"}
+    assert res["tgt.layers.0.out"].item() == 15
+
+
+@pytest.mark.local
+def test_prefix_scope_mapper_source_only() -> None:
+    child_mapper = MergeAddMapper("weight", "bias", "out")
+    prefix_mapper = ModelStateMapperPrefixScope(child_mapper, source_prefix="model.layers.")
+
+    expected_groups = frozenset(
+        [
+            StateGroup(
+                inputs=frozenset(["model.layers.weight", "model.layers.bias"]),
+                outputs=frozenset(["out"]),
+            )
+        ]
+    )
+    assert prefix_mapper.state_dependency_groups() == expected_groups
+
+    data = {
+        "model.layers.weight": torch.tensor(10),
+        "model.layers.bias": torch.tensor(5),
+    }
+
+    res = prefix_mapper.apply(data)
+    assert set(res.keys()) == {"out"}
+    assert res["out"].item() == 15
+
+
+@pytest.mark.local
+def test_prefix_scope_mapper_target_only() -> None:
+    child_mapper = MergeAddMapper("weight", "bias", "out")
+    prefix_mapper = ModelStateMapperPrefixScope(child_mapper, target_prefix="target_model.")
+
+    expected_groups = frozenset(
+        [
+            StateGroup(
+                inputs=frozenset(["weight", "bias"]),
+                outputs=frozenset(["target_model.out"]),
+            )
+        ]
+    )
+    assert prefix_mapper.state_dependency_groups() == expected_groups
+
+    data = {
+        "weight": torch.tensor(10),
+        "bias": torch.tensor(5),
+    }
+
+    res = prefix_mapper.apply(data)
+    assert set(res.keys()) == {"target_model.out"}
+    assert res["target_model.out"].item() == 15
 
 
 @pytest.mark.local
