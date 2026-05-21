@@ -82,3 +82,18 @@ class Qwen3MoEForClassificationParameters(BaseModel):
     model: Qwen3MoEParameters
     num_labels: int
     classifier_dropout: float
+
+
+class Qwen3MoEForEmbeddingParameters(BaseModel):
+    """
+    Configuration parameters for Qwen3 Mixture-of-Experts model with an embedding head.
+
+    Attributes:
+        model: The configuration for the underlying Qwen3 MoE model.
+        embedding_dim: Dimensionality of the output embedding. None for no extra projection.
+        normalize: Whether to apply L2 normalization to the final embeddings.
+    """
+
+    model: Qwen3MoEParameters
+    embedding_dim: int | None = None
+    normalize: bool = False

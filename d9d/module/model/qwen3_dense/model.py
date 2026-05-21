@@ -7,7 +7,7 @@ from torch.utils.checkpoint import checkpoint
 
 from d9d.module.base import ModuleLateInit
 from d9d.module.block.embedding import SplitTokenEmbeddings
-from d9d.module.block.head import ClassificationHead, SplitLanguageModellingHead
+from d9d.module.block.head import ClassificationHead, EmbeddingHead, SplitLanguageModellingHead
 from d9d.module.block.hidden_states_aggregator import HiddenStatesAggregationMode, create_hidden_states_aggregator
 from d9d.module.block.normalization import RMSNorm
 from d9d.module.block.positional import RotaryEmbeddingProvider, RotaryEmbeddingStyle
@@ -18,7 +18,12 @@ from d9d.pipelining.api import (
 )
 
 from .decoder_layer import Qwen3DenseLayer
-from .params import Qwen3DenseForCausalLMParameters, Qwen3DenseForClassificationParameters, Qwen3DenseParameters
+from .params import (
+    Qwen3DenseForCausalLMParameters,
+    Qwen3DenseForClassificationParameters,
+    Qwen3DenseForEmbeddingParameters,
+    Qwen3DenseParameters,
+)
 
 
 class Qwen3DenseModel(nn.Module, ModuleLateInit, ModuleSupportsPipelining):
@@ -432,5 +437,115 @@ class Qwen3DenseForClassification(nn.Module, ModuleLateInit, ModuleSupportsPipel
         if self._stage.is_current_stage_last:
             batch_size = inputs["input_ids"].shape[0] // n_microbatches
             pp_outputs["scores"] = torch.empty((batch_size, self._num_labels), dtype=torch.float32)
+
+        return pp_outputs
+
+
+class Qwen3DenseForEmbedding(nn.Module, ModuleLateInit, ModuleSupportsPipelining):
+    """
+    A Qwen3 Dense model wrapped with an Embedding head.
+
+    It is designed to be split across multiple pipeline stages.
+    """
+
+    def __init__(
+        self,
+        params: Qwen3DenseForEmbeddingParameters,
+        stage: PipelineStageInfo,
+        hidden_states_snapshot_mode: HiddenStatesAggregationMode,
+        enable_checkpointing: bool,
+    ):
+        """
+        Constructs the Qwen3DenseForEmbedding object.
+
+        Args:
+            params: Full model configuration parameters.
+            stage: Pipeline stage information for this instance.
+            hidden_states_snapshot_mode: Configures intermediate hidden state aggregation & snapshotting mode.
+            enable_checkpointing: Whether to enable activation checkpointing.
+        """
+
+        super().__init__()
+
+        self.model = Qwen3DenseModel(
+            params.model,
+            stage,
+            hidden_states_snapshot_mode=hidden_states_snapshot_mode,
+            enable_checkpointing=enable_checkpointing,
+        )
+
+        if stage.is_current_stage_last:
+            self.embedding_head = EmbeddingHead(
+                hidden_size=params.model.layer.hidden_size,
+                embedding_dim=params.embedding_dim,
+                normalize=params.normalize,
+            )
+
+        self._stage = stage
+        self._embedding_dim = (
+            params.embedding_dim if params.embedding_dim is not None else params.model.layer.hidden_size
+        )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None = None,
+        hidden_states: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+        hidden_states_snapshot: torch.Tensor | None = None,
+        hidden_states_agg_mask: torch.Tensor | None = None,
+        pooling_mask: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """
+        Executes the embedding model forward pass.
+
+        Args:
+            input_ids: Input token IDS (for Stage 0).
+            hidden_states: Hidden states from previous stage (for Stage > 0).
+            position_ids: Positional indices for RoPE.
+            hidden_states_snapshot: Intermediate state collector.
+            hidden_states_agg_mask: Mask for state aggregation.
+            pooling_mask: Binary mask indicating which token(s) to pool for embedding extraction.
+
+        Returns:
+            Dictionary containing 'hidden_states', optionally 'hidden_states_snapshot'.
+                If on the last stage, also contains 'embeddings'.
+        """
+
+        model_outputs = self.model(
+            input_ids=input_ids,
+            hidden_states=hidden_states,
+            position_ids=position_ids,
+            hidden_states_snapshot=hidden_states_snapshot,
+            hidden_states_agg_mask=hidden_states_agg_mask,
+        )
+        if self._stage.is_current_stage_last:
+            model_outputs["embeddings"] = self.embedding_head(
+                hidden_states=model_outputs["hidden_states"], pooling_mask=pooling_mask
+            )
+        return model_outputs
+
+    def reset_parameters(self):
+        """
+        Resets module parameters.
+        """
+
+        self.model.reset_parameters()
+
+        if self._stage.is_current_stage_last:
+            self.embedding_head.reset_parameters()
+
+    def infer_stage_inputs_from_pipeline_inputs(
+        self, inputs: dict[str, torch.Tensor], n_microbatches: int
+    ) -> dict[str, torch.Tensor]:
+        return self.model.infer_stage_inputs_from_pipeline_inputs(inputs, n_microbatches)
+
+    def infer_stage_outputs_from_pipeline_inputs(
+        self, inputs: dict[str, torch.Tensor], n_microbatches: int
+    ) -> dict[str, torch.Tensor]:
+        pp_outputs = self.model.infer_stage_outputs_from_pipeline_inputs(inputs, n_microbatches)
+
+        if self._stage.is_current_stage_last:
+            batch_size = inputs["input_ids"].shape[0] // n_microbatches
+            pp_outputs["embeddings"] = torch.empty((batch_size, self._embedding_dim), dtype=torch.float32)
 
         return pp_outputs

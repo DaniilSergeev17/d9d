@@ -8,6 +8,7 @@ from d9d.model_state.mapper.leaf import (
 from .params import (
     Qwen3DenseForCausalLMParameters,
     Qwen3DenseForClassificationParameters,
+    Qwen3DenseForEmbeddingParameters,
     Qwen3DenseParameters,
 )
 
@@ -116,6 +117,23 @@ def mapper_from_huggingface_qwen3_dense_for_classification(
     )
 
 
+def mapper_from_huggingface_qwen3_dense_for_embedding(
+    params: Qwen3DenseForEmbeddingParameters,
+) -> ModelStateMapper:
+    """
+    Creates a state mapper for a Qwen3 Dense embedding model that translates the HuggingFace
+    state dictionary keys into the d9d format.
+
+    Args:
+        params: Embedding model parameters.
+
+    Returns:
+        A composite state mapper.
+    """
+
+    return ModelStateMapperPrefixScope(mapper_from_huggingface_qwen3_dense(params.model), target_prefix="model.")
+
+
 def _mapper_to_huggingface_qwen3_dense_layer() -> ModelStateMapper:
     return ModelStateMapperParallel(
         [
@@ -210,3 +228,23 @@ def mapper_to_huggingface_qwen3_dense_for_classification(
             ModelStateMapperRename(name_from="cls_head.score.weight", name_to="score.weight"),
         ]
     )
+
+
+def mapper_to_huggingface_qwen3_dense_for_embedding(
+    params: Qwen3DenseForEmbeddingParameters,
+) -> ModelStateMapper:
+    """
+    Creates a state mapper for a Qwen3 Dense embedding model that translates the d9d
+    state dictionary keys back into the HuggingFace format.
+
+    Args:
+        params: Embedding model parameters.
+
+    Returns:
+        A composite state mapper.
+    """
+
+    if params.embedding_dim is not None:
+        raise ValueError("Cannot convert a model with trained embedding projection back to HuggingFace")
+
+    return ModelStateMapperPrefixScope(mapper_to_huggingface_qwen3_dense(params.model), source_prefix="model.")

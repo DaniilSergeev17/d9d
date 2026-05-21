@@ -19,6 +19,7 @@ from d9d.model_state.mapper.leaf import (
 from .params import (
     Qwen3MoEForCausalLMParameters,
     Qwen3MoEForClassificationParameters,
+    Qwen3MoEForEmbeddingParameters,
     Qwen3MoELayerParameters,
     Qwen3MoEParameters,
 )
@@ -206,6 +207,27 @@ def mapper_from_huggingface_qwen3_moe_for_classification(
     )
 
 
+def mapper_from_huggingface_qwen3_moe_for_embedding(
+    params: Qwen3MoEForEmbeddingParameters,
+    experts_format: Qwen3MoEExpertsFormat,
+) -> ModelStateMapper:
+    """
+    Creates a state mapper for a Qwen3 MoE embedding model that translates the HuggingFace
+    state dictionary keys into the d9d format.
+
+    Args:
+        params: Embedding model parameters.
+        experts_format: Format of the MoE experts storage.
+
+    Returns:
+        A composite state mapper.
+    """
+
+    return ModelStateMapperPrefixScope(
+        mapper_from_huggingface_qwen3_moe(params.model, experts_format=experts_format), target_prefix="model."
+    )
+
+
 def _experts_mappers_to_huggingface(
     params: Qwen3MoELayerParameters, experts_format: Qwen3MoEExpertsFormat
 ) -> list[ModelStateMapper]:
@@ -363,4 +385,28 @@ def mapper_to_huggingface_qwen3_moe_for_classification(
             ),
             ModelStateMapperRename(name_from="cls_head.score.weight", name_to="score.weight"),
         ]
+    )
+
+
+def mapper_to_huggingface_qwen3_moe_for_embedding(
+    params: Qwen3MoEForEmbeddingParameters,
+    experts_format: Qwen3MoEExpertsFormat,
+) -> ModelStateMapper:
+    """
+    Creates a state mapper for a Qwen3 MoE embedding model that translates the d9d
+    state dictionary keys back into the HuggingFace format.
+
+    Args:
+        params: Embedding model parameters.
+        experts_format: Format of the MoE experts storage.
+
+    Returns:
+        A composite state mapper.
+    """
+
+    if params.embedding_dim is not None:
+        raise ValueError("Cannot convert a model with trained embedding projection back to HuggingFace")
+
+    return ModelStateMapperPrefixScope(
+        mapper_to_huggingface_qwen3_moe(params.model, experts_format=experts_format), source_prefix="model."
     )

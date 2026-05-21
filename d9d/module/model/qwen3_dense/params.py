@@ -78,3 +78,18 @@ class Qwen3DenseForClassificationParameters(BaseModel):
     model: Qwen3DenseParameters
     num_labels: int
     classifier_dropout: float
+
+
+class Qwen3DenseForEmbeddingParameters(BaseModel):
+    """
+    Configuration parameters for Qwen3 Dense model with an embedding head.
+
+    Attributes:
+        model: The configuration for the underlying Qwen3 Dense model.
+        embedding_dim: Dimensionality of the output embedding. None for no extra projection.
+        normalize: Whether to apply L2 normalization to the final embeddings.
+    """
+
+    model: Qwen3DenseParameters
+    embedding_dim: int | None = None
+    normalize: bool = False
