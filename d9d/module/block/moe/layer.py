@@ -5,7 +5,6 @@ from torch.distributed import ProcessGroup
 from d9d.module.base import ModuleLateInit
 
 from .communications import (
-    DeepEpCommunicationHandler,
     ExpertCommunicationHandler,
     NoCommunicationHandler,
 )
@@ -78,6 +77,8 @@ class MoELayer(nn.Module, ModuleLateInit):
         Args:
             group: The PyTorch process group spanning the expert parallel ranks.
         """
+        # Lazy load the handler to prevent early DeepEP bindings/evaluation
+        from .communications.deepep import DeepEpCommunicationHandler  # noqa: PLC0415
 
         communicator = DeepEpCommunicationHandler(num_experts=self._num_grouped_experts)
         communicator.setup(group, self._hidden_dim, self.router.gate.weight.dtype)

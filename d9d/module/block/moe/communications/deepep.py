@@ -8,9 +8,6 @@ from d9d.kernel.moe.indices_to_multihot import fused_indices_to_multihot
 from d9d.kernel.moe.permute_with_probs import moe_permute_with_probs, moe_unpermute_mask
 from d9d.module.block.moe.communications import ExpertCommunicationHandler
 
-# see https://github.com/deepseek-ai/DeepEP/blob/main/README.md for examples
-# TODO: implement computation/communication overlap for PP case
-
 _buffer: Buffer | None = None
 
 
