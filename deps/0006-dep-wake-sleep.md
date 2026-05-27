@@ -77,11 +77,20 @@ too much host RAM.
 ### DTensor migration
 
 Parameters and optimizer state can both be `DTensor`. A single pair of module-level helpers — `offload_tensor` /
-`onload_tensor` — encodes the migration once: `offload_tensor` copies the local shard to a host buffer and records
-the four values needed to rebuild the wrapper (`mesh`, `placements`, global `shape`, global `stride`), all read from
-public DTensor accessors; `onload_tensor` copies back and rebuilds the wrapper via the public
-`DTensor.from_local(...)`. No CPU twin `DeviceMesh` is created — between offload and wake the tensor is simply a
-plain CPU shard. Plain (non-distributed) tensors skip the metadata entirely.
+`onload_tensor` — encodes the migration once, and **the DTensor wrapper instance is preserved across the
+transition** — `id(dtensor)` is the same before offload and after wake, as are its `device_mesh`, `placements`,
+global `shape`, and global `stride`. This matters because user code (a `BaseTask`, a metric, a frozen reference
+held outside the `Offloadable` graph) routinely binds a `DTensor` to a local attribute; rebuilding the wrapper
+would silently strand those references on a stale object whose next collective asserts.
+
+To preserve identity, the helpers operate on the wrapper's local shard in place rather than constructing a new
+`DTensor`. `offload_tensor` allocates a host-side mirror, copies the local shard into it, and rebinds the
+wrapper's underlying local storage to that mirror (`dtensor._local_tensor.data = host_mirror`, the same `.data`
+swap `TrackedModules` performs on plain tensors). `onload_tensor` reverses the swap with a fresh device buffer.
+No DTensor metadata is recorded or rebuilt — `device_mesh`, `placements`, global `shape`, and global `stride`
+live on the wrapper and never leave it. No CPU twin `DeviceMesh` is created — between offload and wake the
+wrapper is unused, and its local shard happens to reside on host. Plain (non-distributed) tensors take the same
+`.data` swap path with no DTensor-specific branch.
 
 ### Subsystems
 
@@ -89,7 +98,9 @@ Four components implement `Offloadable`. Each holds its host-side mirror in a pr
 offload / double onload with `RuntimeError`.
 
 - **`TrackedModules`** — swaps `.data` of every parameter and buffer (persistent and non-persistent alike) for a
-  host copy. Preserves `id(tensor)`, so optimizer keys and gradient hooks stay valid.
+  host copy. Preserves `id(tensor)` for both plain tensors and `DTensor`s (see [DTensor migration](#dtensor-migration)
+  for how the wrapper instance survives), so optimizer keys, gradient hooks, and any external references — e.g.
+  a `BaseTask` that captured `model.lm_head.weight` at configure-time — stay valid.
 - **`PipelinedOptimizer`** — moves every tensor entry of the inner optimizers' `state` to host, keyed by
   `(param, key)`. Non-tensor entries (e.g. `step`) and `param_groups` are untouched.
 - **`GradientManager`** — releases the `GradientSynchronizer` bucket buffers (`unbind()`) and resets the residual
@@ -249,5 +260,7 @@ others, so that split was dropped.
 ### CPU twin `DeviceMesh` for offloaded DTensors
 
 Rejected: building a CPU-typed `DeviceMesh` needs a separate gloo process group and a parallel set of collectives
-nothing in d9d uses. Between offload and wake the parameter is unused, so a plain CPU tensor suffices and the
-original CUDA mesh is reused on onload.
+nothing in d9d uses, and it would require recreating the `DTensor` wrapper around the CPU shard — the very
+identity-breaking step the in-place `.data` swap is designed to avoid. Between offload and wake the wrapper is
+unused, so the local shard simply lives on host while `device_mesh` / `placements` remain bound to the original
+CUDA mesh, ready for the wake swap.
