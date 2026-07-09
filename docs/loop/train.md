@@ -63,10 +63,10 @@ The `TrainingConfigurator.configure()` method does:
 4. **Task Instantiation**:
     *   Instantiates the `TrainTask` object using specified `TrainTaskProvider`.
 
-5. **Data Loader Construction**:
-    *   Calls the `DatasetProvider` to get the dataset and wraps it into a `DataLoader`. 
-    *   The DataLoader will move all the Tensor data to this worker's device **automatically**.
-    *   Triggers `EVENT_TRAIN_DATA_LOADER_READY` event.
+5. **Data Stream Construction**:
+    *   Calls the `DataProvider` to build the `MicrobatchPackStream` that yields one pack (a step's worth
+        of microbatches) per iteration.
+    *   Triggers `EVENT_TRAIN_DATA_STREAM_READY` event.
 
 6. **Model Materialization**:
     *   The `ModelStageFactory` runs. This is the heavy lifting of initialization:
@@ -123,9 +123,9 @@ For every global step (`step`), the trainer performs the following actions in st
 1. Triggers `EVENT_TRAIN_STEP_PRE` event.
 2. **Microbatch Execution**
     * Triggers `EVENT_TRAIN_FORWARD_BACKWARD_PRE` event.
-    * The `DataLoader` yields a "Batch Group" containing $N$ microbatches (calculated automatically based on `BatchingConfig`). 
-    * We delegate to the `TrainTask` for mapping data before feeding it into the model.
-    * The gradients will be **accumulated locally** using either regular multiple forward-backward calls if pipeline parallelism is disabled, either using our internal [pipelining API](../internals/pipelining.md). We delegate to `TrainTask` to compute loss values between forward and backward passes.
+    * The `MicrobatchPackStream` yields a **pack** containing $N$ microbatches (one step's worth); the loop moves it to the device.
+    * We delegate to the `TrainTask` for mapping each microbatch before feeding it into the model.
+    * The gradients are **accumulated locally** by running the pipeline program over the pack's microbatches (a single-stage program when pipeline parallelism is disabled) via our internal [pipelining API](../internals/pipelining.md). We delegate to `TrainTask` to compute loss values between forward and backward passes.
     * Last gradient accumulation triggers all-reduce synchronization. Communications may start overlapping here.
     * We delegate to `TrainTask` to accumulate local metrics (e.g., token counts, accuracy) into the `Metric` state.
     * Triggers `EVENT_TRAIN_FORWARD_BACKWARD_POST` event.
@@ -153,7 +153,7 @@ For every global step (`step`), the trainer performs the following actions in st
     *   **Log**: Metrics are finalized and written to the tracker.
     *   **GC**: `ManualGarbageCollector` runs if the current step matches the GC period.
     *   **Event-Based Logic**: Triggers `EVENT_TRAIN_STEP_POST` event.
-    *   **Advance**: The `Stepper` increments the step count.
+    *   **Advance**: The `JobSchedule` increments the step count.
 
 8. **Checkpointing**
     *   If the current step matches `checkpointing.period_steps`, checkpointing is triggered. This acts as a global barrier.

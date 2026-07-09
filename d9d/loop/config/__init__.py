@@ -1,13 +1,12 @@
 from .config import (
-    BatchingConfig,
     CheckpointingConfig,
-    DataLoadingConfig,
     DeterminismConfig,
     GarbageCollectionConfig,
     GradientClippingConfig,
     GradientManagerConfig,
     InferenceConfig,
     JobLoggerConfig,
+    JobScheduleConfig,
     ModelStageFactoryConfig,
     PipeliningConfig,
     ProfilingConfig,
@@ -17,15 +16,14 @@ from .config import (
 from .types import StepActionPeriod, StepActionSpecial
 
 __all__ = [
-    "BatchingConfig",
     "CheckpointingConfig",
-    "DataLoadingConfig",
     "DeterminismConfig",
     "GarbageCollectionConfig",
     "GradientClippingConfig",
     "GradientManagerConfig",
     "InferenceConfig",
     "JobLoggerConfig",
+    "JobScheduleConfig",
     "ModelStageFactoryConfig",
     "PipeliningConfig",
     "ProfilingConfig",

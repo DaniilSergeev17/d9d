@@ -9,7 +9,6 @@ The foundational primitives managing the cluster.
 
 *   **[Distributed Context](./core/dist_context.md)**: The Source of Truth for topology. Understanding `DeviceMesh` domains (`dense`, `expert`, `batch`).
 *   **[Distributed Operations](./core/dist_ops.md)**: Utilities for gathering var-length tensors and objects.
-*   **[PyTree Sharding](./core/sharding.md)**: Utilities for splitting complex nested structures across ranks.
 *   **[State Offloading](./core/offload.md)**: Releasing GPU training state to host memory for colocated RL (the sleep/wake primitives).
 *   **[Typing Extensions](./core/types.md)**: Python type annotations for common objects and structures.
 
@@ -19,8 +18,8 @@ How to configure and run jobs.
 
 *   **[Training Loop](./loop/train.md)**: The lifecycle of the `Trainer`, dependency injection, and execution flow.
 *   **[Inference Loop](./loop/inference.md)**: The lifecycle of distributed `Inference` and forward-only execution.
-*   **[Configuration](./loop/config.md)**: Pydantic schemas for configuring jobs, batching, and logging.
-*   **[Interfaces (Providers & Tasks)](./loop/interfaces/index.md)**: How to inject your custom Model, Dataset, and Step logic (Train & Infer).
+*   **[Configuration](./loop/config.md)**: Pydantic schemas for configuring jobs, scheduling, and logging.
+*   **[Interfaces (Providers & Tasks)](./loop/interfaces/index.md)**: How to inject your custom Model, Data, and Step logic (Train & Infer).
 
 
 ## 💾 Data & State
@@ -67,6 +66,5 @@ Deep dive into the engine room.
 *   **[Gradient Sync](./internals/grad_sync.md)**: Custom backward hooks for overlapping comms.
 *   **[Gradient Norm & Clipping](./internals/grad_norm.md)**: Correct global norm calculation across hybrid meshes.
 *   **[Metric Collection](./internals/metric_collector.md)**: Custom overlapped metric synchronization & computation.
-*   **[Pipeline State](./internals/pipeline_state.md)**: Context switching between Global and Microbatch scopes.
 *   **[Determinism](./internals/determinism.md)**.
 *   **[Profiling](./internals/profiling.md)**.

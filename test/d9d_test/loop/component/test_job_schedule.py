@@ -1,45 +1,89 @@
 import pytest
-from d9d.loop.component.stepper import Stepper
-from d9d.loop.config import StepActionSpecial
+from d9d.loop.component.job_schedule import JobSchedule
+from d9d.loop.config import JobScheduleConfig, StepActionSpecial
+
+
+class FakeStream:
+    def __init__(self, total_steps: int | None):
+        self._total_steps = total_steps
+
+    @property
+    def total_steps(self) -> int | None:
+        return self._total_steps
 
 
 @pytest.mark.local
-def test_stepper_initialization_and_stepping():
-    stepper = Stepper(initial_step=0, total_steps=10)
+def test_job_schedule_initialization_and_stepping():
+    schedule = JobSchedule(config=JobScheduleConfig(total_steps=10), stream=FakeStream(None))
 
-    assert stepper.current_step == 0
-    assert stepper.total_steps == 10
+    assert schedule.current_step == 0
+    assert schedule.total_steps == 10
 
-    stepper.step()
-    assert stepper.current_step == 1
+    schedule.step()
+    assert schedule.current_step == 1
 
-    stepper.step()
-    assert stepper.current_step == 2
+    schedule.step()
+    assert schedule.current_step == 2
 
-    assert stepper.total_steps == 10
-
-
-@pytest.mark.local
-def test_stepper_state_dict_roundtrip():
-    stepper = Stepper(initial_step=5, total_steps=20)
-    state = stepper.state_dict()
-
-    new_stepper = Stepper(initial_step=0, total_steps=20)
-    new_stepper.load_state_dict(state)
-
-    assert new_stepper.current_step == 5
-    new_stepper.step()
-    assert new_stepper.current_step == 6
+    assert schedule.total_steps == 10
 
 
 @pytest.mark.local
-def test_stepper_load_state_dict_config_mismatch():
-    saver = Stepper(initial_step=10, total_steps=100)
+@pytest.mark.parametrize(
+    ("config_total_steps", "stream", "expected"),
+    [
+        (10, FakeStream(None), 10),  # config set, stream length unknown -> config
+        (10, FakeStream(20), 10),  # config set, length >= config -> config
+        (20, FakeStream(20), 20),  # config set, length == config -> config
+        (None, FakeStream(20), 20),  # config unset, stream length known -> length
+    ],
+)
+def test_job_schedule_total_steps_resolution(config_total_steps, stream, expected):
+    schedule = JobSchedule(config=JobScheduleConfig(total_steps=config_total_steps), stream=stream)
+    assert schedule.total_steps == expected
+
+
+@pytest.mark.local
+def test_job_schedule_total_steps_config_exceeds_data():
+    with pytest.raises(ValueError, match="exceeds the number of steps"):
+        JobSchedule(config=JobScheduleConfig(total_steps=30), stream=FakeStream(20))
+
+
+@pytest.mark.local
+def test_job_schedule_total_steps_unresolvable():
+    with pytest.raises(ValueError, match="Cannot resolve total_steps"):
+        JobSchedule(config=JobScheduleConfig(total_steps=None), stream=FakeStream(None))
+
+
+@pytest.mark.local
+def test_job_schedule_state_dict_roundtrip():
+    schedule = JobSchedule(config=JobScheduleConfig(total_steps=20), stream=FakeStream(None))
+    schedule.step()
+    schedule.step()
+    schedule.step()
+    schedule.step()
+    schedule.step()
+    state = schedule.state_dict()
+
+    new_schedule = JobSchedule(config=JobScheduleConfig(total_steps=20), stream=FakeStream(None))
+    new_schedule.load_state_dict(state)
+
+    assert new_schedule.current_step == 5
+    new_schedule.step()
+    assert new_schedule.current_step == 6
+
+
+@pytest.mark.local
+def test_job_schedule_load_state_dict_allows_changed_budget():
+    saver = JobSchedule(config=JobScheduleConfig(total_steps=100), stream=FakeStream(None))
     state = saver.state_dict()
 
-    loader = Stepper(initial_step=0, total_steps=200)
-    with pytest.raises(ValueError, match="Step count differs"):
-        loader.load_state_dict(state)
+    # The budget can change across resumes - only the current step is restored.
+    loader = JobSchedule(config=JobScheduleConfig(total_steps=200), stream=FakeStream(None))
+    loader.load_state_dict(state)
+
+    assert loader.current_step == 0
+    assert loader.total_steps == 200
 
 
 @pytest.mark.local
@@ -94,12 +138,12 @@ def test_should_do_action(
     is_post_step,
     expected,
 ) -> None:
-    stepper = Stepper(initial_step=0, total_steps=total_steps)
+    schedule = JobSchedule(config=JobScheduleConfig(total_steps=total_steps), stream=FakeStream(None))
     # Manually set private attribute to simulate state for test
-    stepper._current_step = current_step
+    schedule._current_step = current_step
 
     assert (
-        stepper.should_do_action(
+        schedule.should_do_action(
             action,
             enable_on_last_step_if_periodic=enable_on_last,
             is_post_step_action=is_post_step,
@@ -110,13 +154,13 @@ def test_should_do_action(
 
 @pytest.mark.local
 def test_should_do_action_invalid_input():
-    stepper = Stepper(initial_step=1, total_steps=10)
+    schedule = JobSchedule(config=JobScheduleConfig(total_steps=10), stream=FakeStream(None))
 
     with pytest.raises(ValueError):
-        stepper.should_do_action(0)
+        schedule.should_do_action(0)
 
     with pytest.raises(ValueError):
-        stepper.should_do_action(-5)
+        schedule.should_do_action(-5)
 
     with pytest.raises(ValueError, match="Invalid step configuration"):
-        stepper.should_do_action("invalid_action")
+        schedule.should_do_action("invalid_action")

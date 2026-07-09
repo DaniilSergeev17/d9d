@@ -17,7 +17,6 @@ nav = [
     { "Core" = [
         "core/dist_context.md",
         "core/dist_ops.md",
-        "core/sharding.md",
         "core/types.md",
         "core/offload.md",
         "core/autograd_extensions.md"
@@ -91,7 +90,6 @@ nav = [
         "internals/grad_norm.md",
         "internals/grad_sync.md",
         "internals/metric_collector.md",
-        "internals/pipeline_state.md",
         "internals/pipelining.md",
         "internals/profiling.md",
         "internals/tracker_integration.md",

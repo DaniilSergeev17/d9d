@@ -1,16 +1,68 @@
-from typing import Any
+import dataclasses
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch.autograd.profiler import record_function
 
-from d9d.core.dist_context import REGULAR_DOMAIN, DistributedContext
-from d9d.core.sharding import ShardingSpec, shard_spec_on_dim, shard_tree
-from d9d.pipelining.api import PipelineLossFn, PipelineResultFn, PipelineSchedule, PipelineShardingSpec
+from d9d.core.dist_context import DistributedContext
+from d9d.core.types import TensorSpec
+from d9d.pipelining.api import PipelineLossFn, PipelineResultFn, PipelineSchedule
 from d9d.pipelining.infra.stage import PipelineStage
 
-from .action import ActionBase, ActionContext
+from .action import ActionContext
 from .callback import PipelineLossHandler, PipelineResultHandler
 from .communications import PipelineCommunicationHandler
+from .program_cache import PipelineProgramCache
+
+if TYPE_CHECKING:
+    from ..program import PipelineProgramBuilder
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _MicrobatchInputSpec:
+    """A hashable shape/dtype fingerprint of one microbatch's named input tensors."""
+
+    named_specs: tuple[tuple[str, TensorSpec], ...]
+
+    @classmethod
+    def of(cls, microbatch: dict[str, torch.Tensor]) -> "_MicrobatchInputSpec":
+        """Builds a fingerprint from a single microbatch's inputs.
+
+        Args:
+            microbatch: The microbatch's input tensors.
+
+        Returns:
+            A hashable fingerprint of its named tensor specs.
+        """
+        return cls(
+            named_specs=tuple(
+                (name, TensorSpec(shape=tuple(tensor.shape), dtype=tensor.dtype, layout=tensor.layout))
+                for name, tensor in sorted(microbatch.items())
+            )
+        )
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _BufferConfig:
+    """Identifies a stage-buffer allocation: the input fingerprint of every microbatch in the pack.
+
+    Buffers are sized per microbatch, so the cache key covers all of them — a pack whose microbatch
+    shapes differ from the last step's (in count or in any individual shape) reconfigures.
+    """
+
+    microbatches: tuple[_MicrobatchInputSpec, ...]
+
+    @classmethod
+    def of(cls, inputs_microbatches: tuple[dict[str, torch.Tensor], ...]) -> "_BufferConfig":
+        """Builds a buffer config from the per-microbatch inputs of a pack.
+
+        Args:
+            inputs_microbatches: The per-microbatch input tensors whose shapes/dtypes size the buffers.
+
+        Returns:
+            A hashable buffer configuration key covering every microbatch.
+        """
+        return cls(microbatches=tuple(_MicrobatchInputSpec.of(microbatch) for microbatch in inputs_microbatches))
 
 
 class PipelineScheduleExecutor(PipelineSchedule):
@@ -20,88 +72,71 @@ class PipelineScheduleExecutor(PipelineSchedule):
         self,
         dist_context: DistributedContext,
         stages: list[PipelineStage],
-        num_microbatches: int,
-        callback: PipelineLossFn | PipelineResultFn,
-        program: dict[int, list[ActionBase]],
+        program_builder: "PipelineProgramBuilder",
     ):
         """Constructs the schedule executor.
 
         Args:
             dist_context: The distributed context.
             stages: List of stages managed by this executor.
-            num_microbatches: Number of microbatches the global batch is split.
-            callback: Function to compute loss or process pipeline results.
-            program: The execution plan mapping rank ID to a list of actions.
+            program_builder: Builder that composes the per-rank action program for a microbatch count.
         """
         self._dist_ctx = dist_context
         self._stages = {stage.info.current_stage: stage for stage in stages}
-        self._num_microbatches = num_microbatches
-        self._program = program
-
-        self._has_backward = any(
-            any(action.has_backward_work for action in sub_program) for sub_program in program.values()
-        )
-
+        self._programs = PipelineProgramCache(dist_context, program_builder)
         self._comm_handler = PipelineCommunicationHandler(self._stages)
 
-        self._callback: PipelineLossHandler | PipelineResultHandler
-        if self._has_backward:
-            self._callback = PipelineLossHandler(callback)
-        else:
-            self._callback = PipelineResultHandler(callback)
+        self._buffer_config: _BufferConfig | None = None
 
-        self._input_data_sharding_spec: ShardingSpec | None = None
-        self._input_kwargs_sharding_spec: ShardingSpec | None = None
-
-    def configure_buffers(
-        self, inputs: dict[str, torch.Tensor], kwargs: dict[str, Any], sharding_spec: PipelineShardingSpec | None
-    ):
-        if sharding_spec is None or sharding_spec.input_data is None:
-            self._input_data_sharding_spec = shard_spec_on_dim(inputs, dim=0)
-        if sharding_spec is None or sharding_spec.input_kwargs is None:
-            self._input_kwargs_sharding_spec = shard_spec_on_dim(kwargs, dim=0)
+    def _configure_buffers(self, inputs_microbatches: tuple[dict[str, torch.Tensor], ...], has_backward: bool):
+        config = _BufferConfig.of(inputs_microbatches)
+        if config == self._buffer_config:
+            return
 
         for stage in self._stages.values():
             stage.configure_buffers(
-                num_microbatches=self._num_microbatches, pipeline_inputs=inputs, has_backward=self._has_backward
+                pipeline_inputs_per_microbatch=inputs_microbatches,
+                has_backward=has_backward,
             )
 
-    def step(self, inputs: dict[str, torch.Tensor], kwargs: dict[str, Any]):
-        if self._input_data_sharding_spec is None or self._input_kwargs_sharding_spec is None:
-            raise ValueError("Please configure sharding specs first")
+        self._buffer_config = config
+
+    def step(
+        self,
+        inputs_microbatches: tuple[dict[str, torch.Tensor], ...],
+        kwargs_microbatches: tuple[dict[str, Any], ...],
+        callback: PipelineLossFn | PipelineResultFn,
+    ):
+        num_microbatches = len(inputs_microbatches)
+        if num_microbatches == 0:
+            raise ValueError("Cannot run a pipeline step over an empty pack")
+        if len(kwargs_microbatches) != num_microbatches:
+            raise ValueError("inputs_microbatches and kwargs_microbatches must have the same length")
+
+        expected_names = inputs_microbatches[0].keys()
+        if any(microbatch.keys() != expected_names for microbatch in inputs_microbatches):
+            raise ValueError("All microbatches in a pack must have the same input names")
+
+        program = self._programs.program_for(num_microbatches)
+        self._configure_buffers(inputs_microbatches, program.has_backward)
+
+        callback_fn = PipelineLossHandler(callback) if program.has_backward else PipelineResultHandler(callback)
 
         self._dist_ctx.logger.debug("Begin pipeline step")
-        pp_group = self._dist_ctx.mesh_for(REGULAR_DOMAIN).get_group("pp")
 
         for stage in self._stages.values():
             stage.reset()
 
-        # Shard inputs and kwargs to microbatches
-        inputs_shard = shard_tree(
-            inputs,
-            num_shards=self._num_microbatches,
-            sharding_spec=self._input_data_sharding_spec,
-            enforce_even_split=True,
-        )
-        kwargs_shard = shard_tree(
-            kwargs,
-            num_shards=self._num_microbatches,
-            sharding_spec=self._input_kwargs_sharding_spec,
-            enforce_even_split=True,
-        )
-
-        my_program = self._program[pp_group.rank()]
-
-        for action in my_program:
+        for action in program.program_this_rank:
             with record_function(str(action)):
                 self._dist_ctx.logger.debug(f"Running pipeline action {action}")
                 action.apply(
                     ActionContext(
-                        callback=self._callback,
+                        callback=callback_fn,
                         stages=self._stages,
                         communications=self._comm_handler,
-                        pipeline_inputs_microbatches=inputs_shard,
-                        pipeline_kwargs_microbatches=kwargs_shard,
+                        pipeline_inputs_microbatches=inputs_microbatches,
+                        pipeline_kwargs_microbatches=kwargs_microbatches,
                     )
                 )
 

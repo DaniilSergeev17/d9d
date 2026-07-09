@@ -24,6 +24,14 @@ from d9d_test.pipelining.definitions import (
 )
 
 
+def _assert_no_live_buffers(stage_object: PipelineStage):
+    # P2P receive buffers are released once consumed, so none should linger after a step.
+    if stage_object._forward_comm is not None:
+        assert len(stage_object._forward_comm._live_buffers) == 0
+    if stage_object._backward_comm is not None:
+        assert len(stage_object._backward_comm._live_buffers) == 0
+
+
 def _do_standard_backward(stages: list[PipelineModel], x: torch.Tensor, y: torch.Tensor):
     x_in = x
     for stage in stages:
@@ -95,17 +103,18 @@ def test_e2e(
 
     schedule_info, _ = build_schedule(
         dist_context=dist_ctx,
-        n_microbatches=n_microbatches,
         schedule_config=schedule_config,
         model_provider=_model_provider,
-        callback=_loss_fn,
     )
 
     not_this_rank_stages = [i for i in range(len(full_stage_modules)) if i not in this_rank_stages]
 
-    schedule_info.schedule.configure_buffers(inputs={"x": x}, kwargs={"y": y}, sharding_spec=None)
+    inputs_microbatches = tuple({"x": x_mb} for x_mb in torch.tensor_split(x, n_microbatches, dim=0))
+    kwargs_microbatches = tuple({"y": y_mb} for y_mb in torch.tensor_split(y, n_microbatches, dim=0))
 
-    schedule_info.schedule.step(inputs={"x": x}, kwargs={"y": y})
+    schedule_info.schedule.step(
+        inputs_microbatches=inputs_microbatches, kwargs_microbatches=kwargs_microbatches, callback=_loss_fn
+    )
 
     assert x.grad is None
     assert y.grad is None
@@ -125,6 +134,7 @@ def test_e2e(
         stage_object: PipelineStage = schedule_info.schedule._stages[this_stage_i]
         assert len(stage_object._backward_comp._cache) == 0
         assert len(stage_object._forward_comp._cache) == 0
+        _assert_no_live_buffers(stage_object)
 
         check_pp_hooks_ran(this_hooks, n_microbatches, override_w1=0 if freeze_w1 else None)
 
@@ -163,10 +173,8 @@ def test_e2e_local(dist_ctx_factory, freeze_w1: bool):
 
     schedule_info, modules = build_schedule(
         dist_context=dist_ctx,
-        n_microbatches=4,  # This number is ignored by OfflinePipelineExecutor logic regarding flow
         schedule_config=schedule_config,
         model_provider=_model_provider,
-        callback=_loss_fn,
     )
 
     assert isinstance(schedule_info.schedule, OfflinePipelineExecutor)
@@ -175,10 +183,7 @@ def test_e2e_local(dist_ctx_factory, freeze_w1: bool):
     assert schedule_info.has_first_stage
     assert schedule_info.has_last_stage
 
-    # configure_buffers is a no-op for Offline executor, but we call it to ensure API compliance
-    schedule_info.schedule.configure_buffers(inputs={"x": x}, kwargs={"y": y}, sharding_spec=None)
-
-    schedule_info.schedule.step(inputs={"x": x}, kwargs={"y": y})
+    schedule_info.schedule.step(inputs_microbatches=({"x": x},), kwargs_microbatches=({"y": y},), callback=_loss_fn)
 
     if freeze_w1:
         assert model.w1.grad is None

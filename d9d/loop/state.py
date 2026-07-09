@@ -2,21 +2,19 @@ import dataclasses
 from typing import Any
 
 from torch.distributed.checkpoint.stateful import Stateful
-from torchdata.stateful_dataloader import StatefulDataLoader
 
 from d9d.core.dist_context import DistributedContext
-from d9d.core.protocol import LRSchedulerProtocol, OptimizerProtocol
+from d9d.core.protocol import LRSchedulerProtocol, MicrobatchPackStream, OptimizerProtocol
 from d9d.loop.component import (
-    BatchMaths,
     GradientClipper,
     GradientManager,
     InferenceTaskOperator,
     JobLogger,
     JobProfiler,
+    JobSchedule,
     ManualGarbageCollector,
     ModelStageExporter,
     StateCheckpointer,
-    Stepper,
     TimeoutManager,
     TrackedModules,
     TrainTaskOperator,
@@ -36,41 +34,39 @@ class JobState(Stateful):
 
     Attributes:
         dist_context: The distributed context.
-        stepper: Component for tracking the current global step and total steps.
+        schedule: Component for tracking the current global step and total steps.
         garbage_collector: Component for manual control of Python garbage collection.
         checkpointer: Component responsible for saving and loading execution states.
         profiler: Component for performance profiling.
         tracked_modules: Container holding the model (or model parts) being executed.
-        batch_maths: Helper for calculating batch sizes and gradient accumulation steps.
-        data_loader: The input data stream.
+        microbatch_pack_stream: The microbatch pack stream feeding the loop.
         timeout_manager: Component for checking and refreshing distributed timeouts.
     """
 
     dist_context: DistributedContext
 
-    stepper: Stepper
+    schedule: JobSchedule
     garbage_collector: ManualGarbageCollector
     checkpointer: StateCheckpointer
     profiler: JobProfiler
 
     tracked_modules: TrackedModules
-    batch_maths: BatchMaths
 
-    data_loader: StatefulDataLoader
+    microbatch_pack_stream: MicrobatchPackStream
 
     timeout_manager: TimeoutManager
 
     def state_dict(self) -> dict[str, Any]:
         return {
-            "stepper": self.stepper.state_dict(),
+            "schedule": self.schedule.state_dict(),
             "tracked_modules": self.tracked_modules.state_dict(),
-            "data_loader": self.data_loader.state_dict(),
+            "microbatch_pack_stream": self.microbatch_pack_stream.state_dict(),
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        self.stepper.load_state_dict(state_dict["stepper"])
+        self.schedule.load_state_dict(state_dict["schedule"])
         self.tracked_modules.load_state_dict(state_dict["tracked_modules"])
-        self.data_loader.load_state_dict(state_dict["data_loader"])
+        self.microbatch_pack_stream.load_state_dict(state_dict["microbatch_pack_stream"])
 
 
 @dataclasses.dataclass(kw_only=True)
