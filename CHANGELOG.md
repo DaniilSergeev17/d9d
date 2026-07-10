@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.17.0 (2026-07-10)
+
+### Documentation
+
+- DEP-0009 Dataflow Refactoring ([#37](https://github.com/d9d-project/d9d/pull/37),
+  [`537bb2e`](https://github.com/d9d-project/d9d/commit/537bb2e37fddd32ecacf535139ecc35f2668dc8b))
+
+### Features
+
+- Advanced pytree support ([#40](https://github.com/d9d-project/d9d/pull/40),
+  [`bd218db`](https://github.com/d9d-project/d9d/commit/bd218db4f343843bc3b1af7101d92984355c5fc0))
+
+
 ## v0.16.0 (2026-06-16)
 
 ### Documentation
