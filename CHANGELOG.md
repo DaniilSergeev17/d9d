@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.18.0 (2026-07-20)
+
+### Features
+
+- Allow arbitrary PyTrees to be passed between pipeline stages
+  ([#41](https://github.com/d9d-project/d9d/pull/41),
+  [`5a475f9`](https://github.com/d9d-project/d9d/commit/5a475f9dcb90171672b9c5ab02e8c3e13e81e111))
+
+
 ## v0.17.0 (2026-07-10)
 
 ### Documentation
