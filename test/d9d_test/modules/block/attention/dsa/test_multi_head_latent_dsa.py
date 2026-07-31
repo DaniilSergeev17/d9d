@@ -87,7 +87,7 @@ def test_attended_count_never_exceeds_top_k() -> None:
     causal_bias = torch.zeros(_SEQ, _SEQ, device=_DEVICE, dtype=_DTYPE).masked_fill_(
         positions.unsqueeze(0) > positions.unsqueeze(1), float("-inf")
     )
-    mask = module.indexer(x, attention_bias=causal_bias) + causal_bias
+    mask = module.indexer(x, causal_bias, _position_embeddings()) + causal_bias
     counts = (mask > float("-inf")).sum(dim=-1)
     assert int(counts.max()) <= top_k
 
@@ -153,7 +153,7 @@ def test_matches_independent_masked_mla(q_lora_rank: int | None) -> None:
     causal = torch.zeros(_SEQ, _SEQ, device=_DEVICE, dtype=_DTYPE).masked_fill_(
         positions.unsqueeze(0) > positions.unsqueeze(1), float("-inf")
     )
-    selected = module.indexer.select_top_k(x, attention_bias=causal)
+    selected = module.indexer.select_top_k(x, causal, rope)
     selection = torch.full((_BATCH, _SEQ, _SEQ), float("-inf"), device=_DEVICE, dtype=_DTYPE).scatter_(
         -1, selected, 0.0
     )
@@ -177,6 +177,45 @@ def test_main_loss_trains_attention_but_not_indexer() -> None:
     assert x.grad is not None
     assert module.attention.kv_up_proj.weight.grad is not None
     assert module.indexer.weights_proj.weight.grad is None
+
+
+@pytest.mark.local
+def test_indexer_loss_matches_dense_reference() -> None:
+    """The indexer objective must equal a dense KL between the MLA distribution and the indexer."""
+    module = _build_mla_dsa(top_k=5)
+    x = torch.randn(_BATCH, _SEQ, _HIDDEN, device=_DEVICE, dtype=_DTYPE)
+    rope = _position_embeddings()
+
+    actual = module.indexer_loss(x, attention_mask=None, position_embeddings=rope)
+
+    positions = torch.arange(_SEQ, device=_DEVICE)
+    causal = torch.zeros(_SEQ, _SEQ, device=_DEVICE, dtype=torch.float32).masked_fill_(
+        positions.unsqueeze(0) > positions.unsqueeze(1), float("-inf")
+    )
+    q, k, _ = module.attention.project_query_key_value(x, rope)
+    scale = (_QK_NOPE_HEAD_DIM + _QK_ROPE_HEAD_DIM) ** -0.5
+    probs = torch.softmax((q.transpose(1, 2) @ k.transpose(1, 2).transpose(-1, -2)) * scale + causal, dim=-1)
+    target = probs.mean(dim=1)
+
+    log_probs = torch.log_softmax(module.indexer.index_scores(x, causal, rope), dim=-1)
+    expected = torch.where(target > 0.0, target * (torch.log(target) - log_probs), 0.0).sum(dim=-1).mean()
+
+    assert actual >= 0.0
+    assert_close(actual, expected)
+
+
+@pytest.mark.local
+def test_indexer_loss_trains_only_the_indexer() -> None:
+    """The auxiliary objective is isolated from the main model: only indexer parameters get gradients."""
+    module = _build_mla_dsa(top_k=5)
+    x = torch.randn(_BATCH, _SEQ, _HIDDEN, device=_DEVICE, dtype=_DTYPE, requires_grad=True)
+
+    module.indexer_loss(x, attention_mask=None, position_embeddings=_position_embeddings()).backward()
+
+    assert module.indexer.q_proj.weight.grad is not None
+    assert module.indexer.weights_proj.weight.grad is not None
+    assert module.attention.kv_up_proj.weight.grad is None
+    assert x.grad is None
 
 
 _DIST_HIDDEN = 256
@@ -276,7 +315,7 @@ class _DsaWithAux(nn.Module):
         self, hidden_states: torch.Tensor, position_embeddings: tuple[torch.Tensor, torch.Tensor]
     ) -> tuple[torch.Tensor, torch.Tensor]:
         out = self.dsa(hidden_states, attention_mask=None, position_embeddings=position_embeddings)
-        return out, self.dsa.indexer.index_scores(hidden_states)
+        return out, self.dsa.indexer.index_scores(hidden_states, None, position_embeddings)
 
 
 def _dist_forward_and_loss(module: _DsaWithAux, inputs: _DistInputs) -> tuple[torch.Tensor, torch.Tensor]:

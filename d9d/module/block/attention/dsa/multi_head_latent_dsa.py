@@ -2,7 +2,11 @@ import torch
 from torch import nn
 
 from d9d.module.base import ModuleLateInit
-from d9d.module.block.attention.dsa.lightning_indexer import LightningIndexer, build_sparse_selection_mask
+from d9d.module.block.attention.dsa.lightning_indexer import (
+    LightningIndexer,
+    build_sparse_selection_mask,
+    indexer_kl_loss,
+)
 from d9d.module.block.attention.multi_head_latent import MultiHeadLatentAttention
 from d9d.module.block.attention.sdpa import AnySdpaBackendConfig, TorchSdpaBackendConfig
 from d9d.module.block.positional import RotaryEmbeddingStyle
@@ -21,6 +25,9 @@ class MultiHeadLatentSparseAttention(nn.Module, ModuleLateInit):
     the top-k highest scoring tokens are kept, all other positions are masked out before
     the softmax, and causality is folded into the same additive mask (so MLA runs with
     ``is_causal=False`` and any mask-capable SDPA backend can be used).
+
+    The selection is non-differentiable, so the main loss never trains the indexer;
+    ``indexer_loss`` provides the auxiliary objective that does.
 
     References:
         [DeepSeek-V3.2](https://arxiv.org/abs/2512.02556)
@@ -77,11 +84,15 @@ class MultiHeadLatentSparseAttention(nn.Module, ModuleLateInit):
             rope_style=rope_style,
             sdpa_backend=sdpa_backend if sdpa_backend is not None else TorchSdpaBackendConfig(),
         )
+        # The indexer reuses the (cos, sin) embeddings of the main attention, so its RoPE
+        # sub-vector spans the decoupled RoPE dimension of MLA, as in DeepSeek-V3.2.
         self.indexer = LightningIndexer(
             hidden_size=hidden_size,
             num_heads=index_n_heads,
             head_dim=index_head_dim,
             top_k=index_top_k,
+            rope_style=rope_style,
+            rope_dim=qk_rope_head_dim,
         )
 
     def forward(
@@ -101,10 +112,53 @@ class MultiHeadLatentSparseAttention(nn.Module, ModuleLateInit):
         Returns:
             The attention output tensor. Shape: ``(batch, seq_len, hidden_size)``.
         """
-        sparse_mask = build_sparse_selection_mask(self.indexer, hidden_states, attention_mask)
+        sparse_mask = build_sparse_selection_mask(self.indexer, hidden_states, attention_mask, position_embeddings)
         return self.attention(
             hidden_states=hidden_states,
             attention_mask=sparse_mask,
+            position_embeddings=position_embeddings,
+        )
+
+    def indexer_loss(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        """Computes the auxiliary objective that trains the lightning indexer.
+
+        The top-k selection is non-differentiable, so this objective — the KL divergence between the
+        head-averaged distribution of the wrapped attention and the indexer distribution — is the only
+        thing that trains the indexer. It is expected to be called with the same inputs as ``forward``
+        and added to the training loss. Following DeepSeek-V3.2, the indexer is optimized separately
+        from the main model: the inputs are detached here, so the gradients of this objective reach the
+        indexer parameters only.
+
+        The target is read from the wrapped attention's projections, whose parameters are only unsharded
+        during a forward pass; under FSDP this must therefore be called from within the forward of the
+        enclosing sharded module (e.g. the decoder layer), next to the ``forward`` call it accompanies.
+
+        Args:
+            hidden_states: Input tensor. Shape: ``(batch, seq_len, hidden_size)``.
+            attention_mask: Optional additive mask (e.g. for padding) applied to both distributions.
+                Broadcastable to ``(batch, 1, seq_len, seq_len)``.
+            position_embeddings: Tuple of ``(cos, sin)`` tensors for RoPE application.
+
+        Returns:
+            The KL objective, averaged over batch elements and query positions. Shape: ``()``.
+        """
+        hidden_states = hidden_states.detach()
+
+        with torch.no_grad():
+            query_states, key_states, _ = self.attention.project_query_key_value(hidden_states, position_embeddings)
+
+        return indexer_kl_loss(
+            indexer=self.indexer,
+            hidden_states=hidden_states,
+            query_states=query_states,
+            key_states=key_states,
+            attention_scale=self.attention.scaling,
+            attention_mask=attention_mask,
             position_embeddings=position_embeddings,
         )
 

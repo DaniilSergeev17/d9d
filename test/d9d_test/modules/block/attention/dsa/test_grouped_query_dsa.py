@@ -80,7 +80,7 @@ def test_attended_count_never_exceeds_top_k() -> None:
     causal_bias = torch.zeros(_SEQ, _SEQ, device=_DEVICE, dtype=_DTYPE).masked_fill_(
         positions.unsqueeze(0) > positions.unsqueeze(1), float("-inf")
     )
-    mask = module.indexer(x, attention_bias=causal_bias) + causal_bias
+    mask = module.indexer(x, causal_bias, _position_embeddings()) + causal_bias
     counts = (mask > float("-inf")).sum(dim=-1)
     assert int(counts.max()) <= top_k
 
@@ -144,14 +144,118 @@ def test_main_loss_trains_attention_but_not_indexer() -> None:
 
 @pytest.mark.local
 def test_index_scores_are_differentiable() -> None:
-    """The indexer is trainable through its (continuous) scores, which an auxiliary
+    """The indexer is trainable through its (continuous) scores, which the auxiliary
     KL objective uses to align the indexer with the main attention distribution."""
     module = _build_dsa(top_k=5)
     x = torch.randn(_BATCH, _SEQ, _HIDDEN, device=_DEVICE, dtype=_DTYPE)
 
-    module.indexer.index_scores(x).pow(2).mean().backward()
+    module.indexer.index_scores(x, None, _position_embeddings()).pow(2).mean().backward()
     assert module.indexer.weights_proj.weight.grad is not None
     assert module.indexer.q_proj.weight.grad is not None
+
+
+def _padding_mask() -> torch.Tensor:
+    """Additive mask hiding the last two key positions, shaped ``(batch, 1, 1, seq_len)``."""
+    mask = torch.zeros(_BATCH, 1, 1, _SEQ, device=_DEVICE, dtype=torch.float32)
+    mask[..., -2:] = float("-inf")
+    return mask
+
+
+def _reference_indexer_loss(
+    module: GroupedQuerySparseAttention,
+    x: torch.Tensor,
+    position_embeddings: tuple[torch.Tensor, torch.Tensor],
+    attention_mask: torch.Tensor | None,
+) -> torch.Tensor:
+    """Dense reference for the indexer objective: KL(head-averaged attention || indexer softmax)."""
+    attn = module.attention
+    b, s, _ = x.shape
+
+    positions = torch.arange(s, device=x.device)
+    bias = torch.zeros(s, s, device=x.device, dtype=torch.float32).masked_fill_(
+        positions.unsqueeze(0) > positions.unsqueeze(1), float("-inf")
+    )
+    if attention_mask is not None:
+        bias = bias + attention_mask
+
+    q, k, _ = attn.project_query_key_value(x, position_embeddings)
+    groups = q.shape[2] // k.shape[2]
+    q_h = q.transpose(1, 2).float()
+    k_h = k.transpose(1, 2).repeat_interleave(groups, dim=1).float()
+
+    probs = torch.softmax((q_h @ k_h.transpose(-1, -2)) * (_HEAD_DIM**-0.5) + bias, dim=-1)
+    target = probs.mean(dim=1)
+
+    index_bias = bias.expand(b, 1, s, s).squeeze(1)
+    log_probs = torch.log_softmax(module.indexer.index_scores(x, index_bias, position_embeddings), dim=-1)
+    per_position = torch.where(target > 0.0, target * (torch.log(target) - log_probs), 0.0).sum(dim=-1)
+    return per_position.mean()
+
+
+@pytest.mark.local
+@pytest.mark.parametrize("with_mask", [False, True])
+def test_indexer_loss_matches_dense_reference(with_mask: bool) -> None:
+    """The chunked, backend-agnostic objective must equal a dense reference KL computation."""
+    module = _build_dsa(top_k=5)
+    x = torch.randn(_BATCH, _SEQ, _HIDDEN, device=_DEVICE, dtype=_DTYPE)
+    rope = _position_embeddings()
+    mask = _padding_mask() if with_mask else None
+
+    actual = module.indexer_loss(x, attention_mask=mask, position_embeddings=rope)
+    expected = _reference_indexer_loss(module, x, rope, mask)
+
+    assert actual >= 0.0
+    assert_close(actual, expected)
+
+
+@pytest.mark.local
+def test_indexer_loss_target_chunking_is_transparent(monkeypatch) -> None:
+    """Query chunking of the KL target must not change the result."""
+    from d9d.module.block.attention.dsa import lightning_indexer
+
+    module = _build_dsa(top_k=5)
+    x = torch.randn(_BATCH, _SEQ, _HIDDEN, device=_DEVICE, dtype=_DTYPE)
+    rope = _position_embeddings()
+
+    unchunked = module.indexer_loss(x, attention_mask=None, position_embeddings=rope)
+    monkeypatch.setattr(lightning_indexer, "_TARGET_PROBABILITY_BUDGET", 1)
+    chunked = module.indexer_loss(x, attention_mask=None, position_embeddings=rope)
+
+    assert_close(chunked, unchunked)
+
+
+@pytest.mark.local
+def test_indexer_loss_trains_only_the_indexer() -> None:
+    """The auxiliary objective is isolated from the main model: only indexer parameters get gradients."""
+    module = _build_dsa(top_k=5)
+    x = torch.randn(_BATCH, _SEQ, _HIDDEN, device=_DEVICE, dtype=_DTYPE, requires_grad=True)
+
+    module.indexer_loss(x, attention_mask=None, position_embeddings=_position_embeddings()).backward()
+
+    assert module.indexer.q_proj.weight.grad is not None
+    assert module.indexer.k_proj.weight.grad is not None
+    assert module.indexer.weights_proj.weight.grad is not None
+    assert module.attention.q_proj.weight.grad is None
+    assert module.attention.o_proj.weight.grad is None
+    assert x.grad is None
+
+
+@pytest.mark.local
+def test_indexer_loss_can_be_optimized() -> None:
+    """Optimizing the objective actually aligns the indexer with the attention distribution."""
+    module = _build_dsa(top_k=5)
+    x = torch.randn(_BATCH, _SEQ, _HIDDEN, device=_DEVICE, dtype=_DTYPE)
+    rope = _position_embeddings()
+    optimizer = torch.optim.Adam(module.indexer.parameters(), lr=1e-2)
+
+    initial = module.indexer_loss(x, attention_mask=None, position_embeddings=rope).item()
+    for _ in range(50):
+        optimizer.zero_grad()
+        loss = module.indexer_loss(x, attention_mask=None, position_embeddings=rope)
+        loss.backward()
+        optimizer.step()
+
+    assert loss.item() < initial / 2
 
 
 def _manual_dsa_reference(
@@ -166,7 +270,7 @@ def _manual_dsa_reference(
     causal = torch.zeros(s, s, device=x.device, dtype=x.dtype).masked_fill_(
         positions.unsqueeze(0) > positions.unsqueeze(1), float("-inf")
     )
-    scores = module.indexer.index_scores(x, attention_bias=causal)
+    scores = module.indexer.index_scores(x, causal, position_embeddings)
     top_k = min(module.indexer.top_k, s)
     selected = scores.topk(top_k, dim=-1).indices
     selection = torch.full((b, s, s), float("-inf"), device=x.device, dtype=x.dtype).scatter_(-1, selected, 0.0)
@@ -323,7 +427,7 @@ class _DsaWithAux(nn.Module):
         self, hidden_states: torch.Tensor, position_embeddings: tuple[torch.Tensor, torch.Tensor]
     ) -> tuple[torch.Tensor, torch.Tensor]:
         out = self.dsa(hidden_states, attention_mask=None, position_embeddings=position_embeddings)
-        return out, self.dsa.indexer.index_scores(hidden_states)
+        return out, self.dsa.indexer.index_scores(hidden_states, None, position_embeddings)
 
 
 def _dist_forward_and_loss(module: _DsaWithAux, inputs: _DistInputs) -> tuple[torch.Tensor, torch.Tensor]:

@@ -32,10 +32,18 @@ Due to its abstract nature it is also can be used as a Multi-Head Attention and 
 A lightweight `LightningIndexer` scores every preceding token for each query as a gated sum of ReLU dot-products; only the top-k highest-scoring tokens are attended to and the rest are masked out before the softmax. This keeps dense-attention quality in long-context settings while restricting each query to `k` (`<< L`) tokens.
 
 * The selection is expressed as an additive mask (via `build_sparse_selection_mask`), so the core attention is delegated to a standard backend with causality folded into the mask (the inner attention is non-causal). Any mask-capable [SDPA backend](#scaled-dot-product-attention-backends) (`torch`/`eager`) can therefore be used.
+* The indexer applies [RoPE](./positional.md) to the leading `rope_dim` components of its queries and keys, reusing the `(cos, sin)` embeddings of the main attention. Its `rope_dim` is therefore dictated by the wrapped attention (`rope_dim`/`head_dim` for GQA, `qk_rope_head_dim` for MLA) and must not exceed `index_head_dim`.
 * Two instantiations are provided, differing only in the core attention they wrap:
     * `GroupedQuerySparseAttention` composes the selection over `GroupedQueryAttention`.
     * `MultiHeadLatentSparseAttention` composes it over `MultiHeadLatentAttention`, matching the MLA instantiation used by DeepSeek-V3.2 (a single latent key-value entry shared across all query heads).
-* `LightningIndexer` is a reusable scorer; its continuous `index_scores` feed the indexer's auxiliary objective, while the hard top-k selection consumed by attention is non-differentiable. As in DeepSeek-V3.2, the indexer is optimized separately from the main model.
+
+#### Training the indexer
+
+The top-k selection is non-differentiable, so the main loss carries no signal for the indexer at all. As in DeepSeek-V3.2, the indexer is trained by a separate objective that aligns it with the attention it gates — `indexer_loss()` on either sparse attention module returns
+
+$$\mathcal{L}_I = \sum_t D_{KL}\big(p_{t,:} \,\|\, \mathrm{Softmax}(I_{t,:})\big)$$
+
+where `p` is the head-averaged distribution of the wrapped attention over the causally allowed keys. Add it (optionally scaled) to the training loss; the inputs are detached inside, so its gradients only ever reach the indexer parameters.
 
 ### Scaled Dot-Product Attention Backends
 
